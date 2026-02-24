@@ -1,0 +1,90 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "stan"
+version = "1.0.0.alpha"
+description = "Stan - LLM Chemical Engineering Thermodynamics Tutor"
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["llm", "thermodynamics", "deep learning", "llama", "pytorch"]
+authors = [
+    { name = "Eric M. Furst", email = "furst@udel.edu" },
+    { name = "Vasu Venkateshwaran", email = "vvenkate@udel.edu" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "numpy>=1.26.0",
+    "scipy>=1.14.0",
+    "pandas>=2.2.3",
+    "matplotlib>=3.9.0",
+    "scikit-learn>=1.5.2",
+    "torch>=2.5.1",
+    "pytorch-lightning>=2.4.0",
+    "opacus>=1.5.2",
+    "dask>=2024.12.0",
+    "xlstm>=1.0.8",
+    "ollama>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.3",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.7.4",
+]
+
+lecture = [
+    "llama-index-core>=0.13.0",
+    "llama-index-embeddings-huggingface>=0.6.0",
+    "llama-index-llms-ollama>=0.7.0",
+    "sentence-transformers>=5.0.0",
+]
+
+transcribe = [
+    "faster-whisper>=1.0.0",
+]
+
+docs = [
+    "sphinx>=8.1.3",
+    "pydata-sphinx-theme>=0.16.0",
+    "numpydoc>=1.8.0",
+    "myst-nb>=1.1.2",
+    "myst-parser>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/EntropicLearners/stan"
+Documentation = ""
+Repository = "https://github.com/EntropicLearners/stan.git"
+Issues = "https://github.com/EntropicLearners/stan/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["stan"]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q --cov=stan"
+testpaths = [
+    "tests",
+]
+
+[tool.ruff]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+]
+line-length = 88

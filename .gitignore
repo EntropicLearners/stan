@@ -1,0 +1,151 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Docs
+**/generated/
+**/data/lectures/
+
+# Distribution / Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+MANIFEST
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.tox/
+.nox/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Flask
+instance/
+.webassets-cache
+
+# Documentation
+docs/_build/
+site/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and Editors
+.spyderproject
+.spyproject
+.ropeproject
+
+# PyCharm (optional - uncomment to ignore)
+# .idea/
+
+# OS-specific files
+.DS_Store
+.Spotlight-V100
+.Trashes
+._*
+Thumbs.db
+desktop.ini
+
+# Typing & Static Analysis
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Cython
+cython_debug/
+
+# PyPI
+.pypirc
+
+# LaTeX files
+*.acn
+*.acr
+*.alg
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.brf
+*.bst
+*.dvi
+*.fdb_latexmk
+*.fls
+*.glg
+*.glo
+*.gls
+*.idx
+*.ilg
+*.ind
+*.ist
+*.lof
+*.log
+*.lol
+*.lot
+*.maf
+*.mtc
+*.mtc1
+*.nav
+*.nlo
+*.nls
+*.out
+*.pdf
+*.pyg
+*.run.xml
+*.snm
+*.synctex.gz
+*.tex.backup
+*.tex~
+*.thm
+*.toc
+*.vrb
+*.xdy
+*.xml
+*blx.bib
+.bak
+*Notes*.bib
