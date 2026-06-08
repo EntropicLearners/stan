@@ -3,7 +3,7 @@ import shutil
 import sys
 from datetime import datetime
 
-import mock
+from unittest import mock
 
 # Path setup
 # ----------
