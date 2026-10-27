@@ -87,7 +87,7 @@ def load(grounding_dir: Path = GROUNDING_DIR) -> tuple[tuple[Convention, ...], t
     if not files:
         raise FileNotFoundError(
             f"No notation primers in {grounding_dir}; "
-            f"run python -m stan.notation.fetch"
+            f"run python -m stan.notation.fetch --go"
         )
     conventions: list[Convention] = []
     symbols: list[Symbol] = []
