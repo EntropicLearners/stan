@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use Stan, please cite the paper below."
+title: "Stan: An LLM-based thermodynamics course assistant"
+type: software
+authors:
+  - family-names: Furst
+    given-names: Eric M.
+    orcid: "https://orcid.org/0000-0002-8849-4484"
+    affiliation: "Department of Chemical and Biomolecular Engineering, University of Delaware"
+  - family-names: Venkateshwaran
+    given-names: Vasudevan
+    orcid: "https://orcid.org/0000-0002-0690-0056"
+    affiliation: "Department of Chemical and Biomolecular Engineering, University of Delaware"
+repository-code: "https://github.com/EntropicLearners/stan"
+keywords:
+  - thermodynamics
+  - chemical engineering education
+  - large language models
+  - retrieval-augmented generation
+preferred-citation:
+  type: article
+  title: "Stan: An LLM-based thermodynamics course assistant"
+  authors:
+    - family-names: Furst
+      given-names: Eric M.
+      orcid: "https://orcid.org/0000-0002-8849-4484"
+    - family-names: Venkateshwaran
+      given-names: Vasudevan
+      orcid: "https://orcid.org/0000-0002-0690-0056"
+  journal: "arXiv preprint arXiv:2603.04657"
+  year: 2026
+  month: 3
+  doi: "10.48550/arXiv.2603.04657"
+  url: "https://arxiv.org/abs/2603.04657"
