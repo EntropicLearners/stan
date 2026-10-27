@@ -1,6 +1,6 @@
 """
-query_rewrite.py - Regex-based query processor for matching student queries to textbook index topics.
-=====================================================================================================
+extract_regex.py - Regex-based query processor for matching student queries to textbook index topics.
+=======================================================================================================
 
 This is the base implementation that uses regular expressions and pattern matching
 to extract key terms from natural language queries and match them against a
@@ -22,7 +22,7 @@ Architecture:
 3. Score matches based on term overlap and position
 4. Return ranked results
 
-This module serves as the base for query_rewrite_llm.py, which extends it
+This module serves as the base for extract_llm.py, which extends it
 with LLM-powered semantic understanding.
 
 Data source: bindex_tab.json (hierarchical thermodynamics textbook index)
@@ -60,7 +60,7 @@ class QueryProcessor:
     - Scoring matches based on term overlap and relevance
     - Formatting results for display to students
 
-    This serves as the base implementation that query_rewrite_llm.QueryProcessorLLM
+    This serves as the base implementation that extract_llm.QueryProcessorLLM
     extends with LLM-powered semantic understanding.
     """
 
@@ -293,8 +293,7 @@ class QueryProcessor:
 def main():
     """Example usage of the QueryProcessor."""
 
-    # Path to index file (adjust as needed)
-    index_path = "../data/bindex_tab.json"
+    index_path = Path(__file__).resolve().parents[1] / "data" / "bindex_tab.json"
 
     # Initialize processor
     processor = QueryProcessor(index_path)

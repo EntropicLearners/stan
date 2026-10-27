@@ -216,7 +216,7 @@ class TOCNavigator:
 def main():
     """Test the TOC navigator with example page lookups."""
 
-    toc_path = "../data/ftoc_nav_tree.json"
+    toc_path = Path(__file__).resolve().parents[1] / "data" / "ftoc_nav_tree.json"
 
     print("=" * 70)
     print("TOC Navigator Test")

@@ -16,7 +16,8 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # LLM model to use in query transform and generation
 # llm="command-r7b"
-llm="llama3.1:8B"
+# llm="llama3.1:8B"
+llm = "gemma4:e4b"
 # llm = "gemma3:1b"
 # llm = "gemma3:270m"
 
@@ -42,11 +43,11 @@ logger = logging.getLogger(__name__)
 
 # index data ends up as a global
 # would be better to make a class
-index_data = stan.hybrid_query.json_rag_tab.load_index(json_path) 
+index_data = stan.rag.json_rag_tab.load_index(json_path) 
 if index_data is None:
     print("Exiting.")
     exit(1)
 else :
     print(f"Index loaded with {len(index_data)} main entries.")    
 
-stan.hybrid_query.json_rag_tab.main(index_data, logger, llm, prompt_option='default')
+stan.rag.json_rag_tab.main(index_data, logger, llm, prompt_option='default')

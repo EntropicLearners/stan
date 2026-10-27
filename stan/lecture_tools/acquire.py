@@ -12,13 +12,13 @@ Expected directory layout:
     └── ...
 
 Usage:
-    from stan.lecture.acquire import LectureCatalog
+    from stan.lecture_tools.acquire import LectureCatalog
 
     catalog = LectureCatalog("stan/data/lectures")
     catalog.summary()
 
     # As CLI
-    python -m stan.lecture.acquire stan/data/lectures
+    python -m stan.lecture_tools.acquire stan/data/lectures
 """
 
 import os

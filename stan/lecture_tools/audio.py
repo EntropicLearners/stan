@@ -5,10 +5,10 @@ Converts MP4 (or other video) files to WAV for Whisper transcription.
 WAV is preferred over MP3 for transcription accuracy (lossless).
 
 Usage:
-    python -m stan.lecture.audio                              # dry run
-    python -m stan.lecture.audio --go                         # extract all
-    python -m stan.lecture.audio --go --format mp3            # smaller files
-    python -m stan.lecture.audio --go --filter CHEG231-010    # only section 010
+    python -m stan.lecture_tools.audio                              # dry run
+    python -m stan.lecture_tools.audio --go                         # extract all
+    python -m stan.lecture_tools.audio --go --format mp3            # smaller files
+    python -m stan.lecture_tools.audio --go --filter CHEG231-010    # only section 010
 
 Requires: ffmpeg (sudo apt install ffmpeg)
 """

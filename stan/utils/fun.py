@@ -1,6 +1,6 @@
 import ollama
 
-def generate_poem(system_prompt, query, retrieved_knowledge, llm="llama3.1:8B"):
+def generate_poem(system_prompt, query, retrieved_knowledge, llm="gemma4:e4b"):
     stream = ollama.chat(
         model=llm, 
         messages=[
@@ -15,7 +15,7 @@ def generate_poem(system_prompt, query, retrieved_knowledge, llm="llama3.1:8B"):
     print("\n")
 
 
-def generate_haiku(system_prompt, query, retrieved_knowledge, llm="llama3.1:8B"):
+def generate_haiku(system_prompt, query, retrieved_knowledge, llm="gemma4:e4b"):
     stream = ollama.chat(
         model=llm, 
         messages=[

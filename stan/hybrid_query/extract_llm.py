@@ -3,7 +3,7 @@
 extract_llm.py - LLM-powered query processor with semantic term extraction via Ollama.
 ======================================================================================
 
-This module extends query_rewrite.QueryProcessor with LLM-based semantic understanding
+This module extends extract_regex.QueryProcessor with LLM-based semantic understanding
 for extracting search terms from student queries. It provides superior query expansion
 and synonym recognition compared to the regex-based approach.
 
@@ -19,7 +19,7 @@ Key advantages over regex version:
 Architecture:
 -------------
 
-- Uses local Ollama API for LLM inference (default model: llama3.2)
+- Uses local Ollama API for LLM inference (default model: gemma4:e4b)
 - Falls back to regex extraction if LLM unavailable (graceful degradation)
 - Reuses scoring and matching logic from base QueryProcessor class
 - Imports QueryProcessor and IndexMatch to avoid code duplication
@@ -28,7 +28,7 @@ Requirements:
 -------------
 
 - Ollama installed and running locally (http://localhost:11434)
-- Model downloaded (e.g., ollama pull llama3.2)
+- Model downloaded (e.g., ollama pull gemma4:e4b)
 
 E. M. Furst, January 2026
 """
@@ -41,6 +41,12 @@ import urllib.error
 
 from stan.hybrid_query.extract_regex import QueryProcessor, IndexMatch
 
+# Default model for term extraction and student answers.  gemma4:e4b fits
+# entirely on a 24 GB GPU and follows the notation primer; llama3.2 (3B),
+# the earlier default, ignored it and presented invented equations "according
+# to the textbook" (A/B test of 10 student queries, 2026-10-03).
+DEFAULT_MODEL = "gemma4:e4b"
+
 
 class OllamaClient:
     """
@@ -50,23 +56,26 @@ class OllamaClient:
     Uses urllib.request instead of the requests library to avoid dependency issues.
     """
 
-    def __init__(self, base_url: str = "http://localhost:11434", model: str = "llama3.2"):
+    def __init__(self, base_url: str = "http://localhost:11434", model: str = DEFAULT_MODEL):
         """
         Initialize Ollama client.
 
         Args:
             base_url: URL of Ollama API server (default: http://localhost:11434)
-            model: Model name to use for generation (default: llama3.2)
+            model: Model name to use for generation (default: DEFAULT_MODEL)
 
         Note on context length (num_ctx):
-            Ollama defaults to num_ctx=2048 regardless of model capability.
-            The query pipeline prompts (~800 tokens total) fit within this default.
-            For full lecture transcripts, analyze.py sets num_ctx=16384 explicitly.
+            Ollama defaults to num_ctx=2048 regardless of model capability, and
+            silently truncates a longer prompt.  Term extraction (~800 tokens)
+            fits the default.  Answer generation with the notation primer
+            (~3-5k tokens) does not, so generate_student_answer passes num_ctx
+            explicitly.  For full lecture transcripts, analyze.py sets its own.
         """
         self.base_url = base_url
         self.model = model
 
-    def generate(self, prompt: str, system: Optional[str] = None, temperature: float = 0.8) -> str:
+    def generate(self, prompt: str, system: Optional[str] = None, temperature: float = 0.8,
+                 num_ctx: Optional[int] = None, timeout: int = 30) -> str:
         """
         Generate text completion using Ollama API.
 
@@ -78,6 +87,8 @@ class OllamaClient:
             system: Optional system message to set model behavior/context
             temperature: Sampling temperature (0.0-2.0). Lower = more deterministic,
                         higher = more creative. Default: 0.8
+            num_ctx: Context window in tokens; None keeps Ollama's default
+            timeout: Request timeout in seconds. Default: 30
 
         Returns:
             Generated text response from the model
@@ -95,6 +106,8 @@ class OllamaClient:
                 "temperature": temperature
             }
         }
+        if num_ctx is not None:
+            payload["options"]["num_ctx"] = num_ctx
 
         if system:
             payload["system"] = system
@@ -106,7 +119,7 @@ class OllamaClient:
                 data=data,
                 headers={'Content-Type': 'application/json'}
             )
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
                 result = json.loads(response.read().decode('utf-8'))
                 return result["response"]
         except urllib.error.URLError as e:
@@ -137,7 +150,7 @@ class QueryProcessorLLM:
         self,
         index_path: str,
         ollama_url: str = "http://localhost:11434",
-        model: str = "llama3.2",
+        model: str = DEFAULT_MODEL,
         use_fallback: bool = True
     ):
         """
@@ -146,7 +159,7 @@ class QueryProcessorLLM:
         Args:
             index_path: Path to the bindex_tab.json hierarchical index file
             ollama_url: Base URL for Ollama API (default: http://localhost:11434)
-            model: Ollama model name to use (default: llama3.2)
+            model: Ollama model name to use (default: DEFAULT_MODEL)
             use_fallback: If True, falls back to regex extraction when LLM fails
                          (recommended for production to ensure robustness)
         """
@@ -388,7 +401,7 @@ def main():
     """Example usage comparing LLM vs regex extraction."""
 
     # Path to index file
-    index_path = "../data/bindex_tab.json"
+    index_path = Path(__file__).resolve().parents[1] / "data" / "bindex_tab.json"
 
     print("=" * 70)
     print("LLM-Powered Query Processor")
@@ -426,7 +439,7 @@ def main():
         print(f"✗ {e}")
         print("\nTo use this script, make sure Ollama is running:")
         print("  1. Install Ollama: https://ollama.ai/")
-        print("  2. Run: ollama pull llama3.2")
+        print(f"  2. Run: ollama pull {DEFAULT_MODEL}")
         print("  3. Start Ollama service")
 
 

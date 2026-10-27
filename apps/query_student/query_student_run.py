@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# query_student.py
+# query_student_run.py
 
 """
 Student query interface for thermodynamics textbook index search.
@@ -14,8 +14,8 @@ Features:
 - Generates student-friendly answers with page references
 
 Usage:
-    python query_student.py "What is entropy?"
-    python query_student.py "Where can I read about van der Waals equation?"
+    python apps/query_student/query_student_run.py "What is entropy?"
+    python apps/query_student/query_student_run.py "Where can I read about van der Waals equation?"
 
 E. M. Furst, January 2026
 """
@@ -24,12 +24,12 @@ import sys
 import argparse
 from pathlib import Path
 
-# Add the stan/run directory to the path so we can import modules
+# Add the repository root to the path so we can import modules
 run_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(run_dir))
 
 from stan.hybrid_query.extract_regex import QueryProcessor
-from stan.hybrid_query.extract_llm import QueryProcessorLLM, OllamaClient
+from stan.hybrid_query.extract_llm import QueryProcessorLLM, OllamaClient, DEFAULT_MODEL
 from stan.hybrid_query.compare_extractors import merge_results, generate_student_answer
 from stan.hybrid_query.toc_navigator import TOCNavigator
 
@@ -73,7 +73,7 @@ def process_query(query: str, model: str = None, show_trace: bool = True):
             ollama = OllamaClient()
         llm_available = True
         if show_trace:
-            print(f"✓ Using model: {model or 'llama3.2 (default)'}")
+            print(f"✓ Using model: {model or DEFAULT_MODEL + ' (default)'}")
     except RuntimeError as e:
         if show_trace:
             print(f"Warning: LLM not available ({e}). Using regex only.")
@@ -214,7 +214,7 @@ def main():
     )
     parser.add_argument("query", nargs="+", help="Natural language question")
     parser.add_argument("--model", "-m", default=None,
-                        help="Ollama model for answer generation (default: llama3.2)")
+                        help=f"Ollama model for answer generation (default: {DEFAULT_MODEL})")
     args = parser.parse_args()
 
     query = " ".join(args.query)

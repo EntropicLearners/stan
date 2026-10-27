@@ -8,7 +8,6 @@ __pycache__/
 
 # Docs
 **/generated/
-**/data/lectures/
 
 # Distribution / Packaging
 .Python
@@ -74,6 +73,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Claude Code — share project settings, keep per-machine overrides local
+.claude/settings.local.json
+
 # IDEs and Editors
 .spyderproject
 .spyproject
@@ -89,6 +91,15 @@ venv.bak/
 ._*
 Thumbs.db
 desktop.ini
+
+# Lecture data (media, transcripts, analysis output, vector index) and your
+# course configuration stay local; only the example templates are tracked.
+# Copy stan/data/lectures/*.example.json to start (see docs/howto.md).
+stan/data/lectures/*
+!stan/data/lectures/*.example.json
+
+# Notation primers, downloaded with `python -m stan.notation.fetch --go`
+stan/data/grounding/
 
 # Typing & Static Analysis
 .mypy_cache/

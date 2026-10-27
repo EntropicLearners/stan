@@ -7,18 +7,18 @@ to detect and collapse Whisper hallucination loops (repeated segments).
 
 Usage:
     # Transcribe a single file (good for testing)
-    python -m stan.lecture.transcribe one path/to/audio.wav
+    python -m stan.lecture_tools.transcribe one path/to/audio.wav
 
     # Batch transcribe all audio files
-    python -m stan.lecture.transcribe batch                    # dry run
-    python -m stan.lecture.transcribe batch --go               # transcribe all
-    python -m stan.lecture.transcribe batch --go --filter 010  # section 010 only
+    python -m stan.lecture_tools.transcribe batch                    # dry run
+    python -m stan.lecture_tools.transcribe batch --go               # transcribe all
+    python -m stan.lecture_tools.transcribe batch --go --filter 010  # section 010 only
 
     # List available models
-    python -m stan.lecture.transcribe models
+    python -m stan.lecture_tools.transcribe models
 
 Requires: pip install faster-whisper (or pip install -e '.[transcribe]')
-Hardware: NVIDIA GPU recommended (large-v3 uses ~10GB VRAM on 4090)
+Hardware: NVIDIA GPU recommended (large-v3-turbo uses ~4GB VRAM on 4090)
 """
 from __future__ import annotations
 
@@ -64,8 +64,14 @@ THERMO_PROMPT = (
 REPEAT_THRESHOLD = 3  # minimum consecutive identical segments to flag as loop
 
 # Model presets: name -> (description, approx VRAM)
+#
+# large-v3-turbo is the default: a distilled 4-layer decoder version of
+# large-v3 with near-identical English WER at ~4x the speed and less than
+# half the VRAM.  The first 35 lectures (Feb 2026) were transcribed with
+# large-v3, which remains available with --model for consistency checks.
 MODELS = {
-    "large-v3": ("Most accurate, best for technical vocabulary", "~10 GB"),
+    "large-v3-turbo": ("Distilled large-v3: ~4x faster, near-identical English WER", "~4 GB"),
+    "large-v3": ("Original large-v3, used for the Feb 2026 transcripts", "~10 GB"),
     "medium": ("Good accuracy, faster", "~5 GB"),
     "small": ("Decent accuracy, much faster", "~2 GB"),
     "base": ("Basic accuracy, very fast", "~1 GB"),
@@ -140,7 +146,56 @@ def collapse_hallucination_loops(
     return cleaned, removed
 
 
-def load_model(model_size: str = "large-v3", device: str = "auto"):
+def _preload_cuda12_libs() -> None:
+    """Make the CUDA 12 runtime libraries loadable by ctranslate2.
+
+    ctranslate2 needs cuBLAS 12 and cuDNN 9, but resolves them through the
+    dynamic linker rather than importing them, so pip-installed copies under
+    ``site-packages/nvidia/`` are invisible unless they are on
+    LD_LIBRARY_PATH.  Normally torch's bundled copies happen to satisfy this,
+    but a torch built for a different CUDA major version ships ``.so.13``
+    instead of ``.so.12`` and the load fails part-way through the first
+    encode with:
+
+        RuntimeError: Library libcublas.so.12 is not found or cannot be loaded
+
+    Loading each library here with RTLD_GLOBAL registers its soname in the
+    process, so ctranslate2's later lookups -- and cuDNN's own dlopen of its
+    sub-libraries -- resolve without the caller having to set
+    LD_LIBRARY_PATH.  Matching only the ``.so.12`` and ``.so.9`` sonames
+    keeps torch's CUDA 13 libraries out of it.
+
+    Failures are non-fatal: a library may legitimately be absent, or already
+    available system-wide.
+    """
+    import ctypes
+    import sysconfig
+
+    nvidia_root = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+    if not nvidia_root.is_dir():
+        return
+
+    pending = [
+        lib
+        for pattern in ("*.so.12", "*.so.9")
+        for lib in sorted(nvidia_root.glob(f"*/lib/{pattern}"))
+    ]
+
+    # Two passes: the first loads whatever has no unmet dependencies, the
+    # second picks up libraries that depend on those (e.g. cuBLAS on cuBLASLt).
+    for _ in range(2):
+        failed = []
+        for lib in pending:
+            try:
+                ctypes.CDLL(str(lib), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                failed.append(lib)
+        if not failed:
+            break
+        pending = failed
+
+
+def load_model(model_size: str = "large-v3-turbo", device: str = "auto"):
     """Load a faster-whisper model."""
     try:
         from faster_whisper import WhisperModel
@@ -150,11 +205,16 @@ def load_model(model_size: str = "large-v3", device: str = "auto"):
         sys.exit(1)
 
     if device == "auto":
-        try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            device = "cpu"
+        # Ask ctranslate2, not torch.  faster-whisper runs on the ctranslate2
+        # runtime and never touches torch, so a torch build compiled against
+        # the wrong CUDA version (a real failure mode here: torch 2.12+cu130
+        # against a 535 driver) would otherwise force a silent, ~50x slower
+        # fall back to CPU while the GPU sat idle.
+        import ctranslate2
+        device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+
+    if device == "cuda":
+        _preload_cuda12_libs()
 
     compute_type = "float16" if device == "cuda" else "int8"
     print(f"Loading {model_size} on {device} ({compute_type})...")
@@ -328,7 +388,7 @@ def cmd_models(args):
     print("Available faster-whisper models:\n")
     for name, (desc, vram) in MODELS.items():
         print(f"  {name:12s}  {desc} ({vram} VRAM)")
-    print(f"\nDefault: large-v3")
+    print("\nDefault: large-v3-turbo")
 
 
 def main():
@@ -341,7 +401,7 @@ def main():
     p_one = sub.add_parser("one", help="Transcribe a single audio file")
     p_one.add_argument("audio_file", help="Path to audio file")
     p_one.add_argument("--output-dir", type=str, default=str(DEFAULT_TRANSCRIPT_DIR))
-    p_one.add_argument("--model", default="large-v3", choices=MODELS.keys())
+    p_one.add_argument("--model", default="large-v3-turbo", choices=MODELS.keys())
     p_one.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p_one.add_argument("--no-prompt", action="store_true",
                        help="Disable thermodynamics vocabulary prompt")
@@ -351,7 +411,7 @@ def main():
     p_batch = sub.add_parser("batch", help="Batch transcribe audio files")
     p_batch.add_argument("--audio-dir", type=str, default=str(DEFAULT_AUDIO_DIR))
     p_batch.add_argument("--output-dir", type=str, default=str(DEFAULT_TRANSCRIPT_DIR))
-    p_batch.add_argument("--model", default="large-v3", choices=MODELS.keys())
+    p_batch.add_argument("--model", default="large-v3-turbo", choices=MODELS.keys())
     p_batch.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     p_batch.add_argument("--go", action="store_true", help="Actually transcribe")
     p_batch.add_argument("--overwrite", action="store_true")
