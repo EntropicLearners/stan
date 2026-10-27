@@ -2,6 +2,7 @@ cff-version: 1.2.0
 message: "If you use Stan, please cite the paper below."
 title: "Stan: An LLM-based thermodynamics course assistant"
 type: software
+license: MIT
 authors:
   - family-names: Furst
     given-names: Eric M.
