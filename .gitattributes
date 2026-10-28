@@ -1,0 +1,3 @@
+# Keep line endings LF in the repository, whatever the contributor's platform.
+* text=auto eol=lf
+*.bat -text
