@@ -18,7 +18,7 @@ Pipeline:
 
 Usage:
     # Build index from a transcript
-    from stan.lecture.segment import LectureIndex
+    from stan.lecture_tools.segment import LectureIndex
 
     idx = LectureIndex()
     idx.build("stan/data/lectures/transcripts/lecture.txt")
@@ -28,8 +28,8 @@ Usage:
     print(response)
 
     # CLI
-    python -m stan.lecture.segment build transcript.txt
-    python -m stan.lecture.segment query "entropy generation"
+    python -m stan.lecture_tools.segment build transcript.txt
+    python -m stan.lecture_tools.segment query "entropy generation"
 """
 
 from pathlib import Path
@@ -38,7 +38,7 @@ from pathlib import Path
 EMBED_MODEL = "BAAI/bge-large-en-v1.5"
 CHUNK_SIZE = 512       # larger than ssearch's 256 — lecture topics run longer
 CHUNK_OVERLAP = 50     # proportional overlap
-LLM_MODEL = "llama3.1:8B"
+LLM_MODEL = "gemma4:31b"
 SIMILARITY_TOP_K = 15
 PERSIST_DIR = "stan/data/lectures/index"
 

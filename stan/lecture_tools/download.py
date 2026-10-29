@@ -6,9 +6,9 @@ download URLs (undoing quoted-printable line wrapping), and fetches
 each recording with curl.
 
 Usage (on remote machine):
-    python -m stan.lecture.download                          # dry run
-    python -m stan.lecture.download --go                     # download all
-    python -m stan.lecture.download --go --filter CHEG231-010  # only section 010
+    python -m stan.lecture_tools.download                          # dry run
+    python -m stan.lecture_tools.download --go                     # download all
+    python -m stan.lecture_tools.download --go --filter CHEG231-010  # only section 010
 
 Requires: curl (standard on Linux/macOS)
 """

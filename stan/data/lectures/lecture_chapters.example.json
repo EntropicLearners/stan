@@ -1,0 +1,13 @@
+{
+  "_comment": "Example: copy to lecture_chapters.json and edit. Textbook chapters covered by each lecture, used to choose the notation primer for summaries (stan.notation). Keys under 'lectures' are lecture numbers shared by all sections; 'overrides' takes a full lecture id (e.g. 010-lecture-05) when one section differs. Chapters 1-4 are always included, so list only what a lecture covers.",
+  "default": [],
+  "lectures": {
+    "1": [1],
+    "2": [1],
+    "3": [2],
+    "4": [2, 3],
+    "5": [3],
+    "6": [3]
+  },
+  "overrides": {}
+}

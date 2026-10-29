@@ -1,0 +1,27 @@
+{
+  "_comment": "Example course schedule: copy to course_schedule.json and edit. Lecture N is the Nth meeting day on or after first_day, skipping no_class dates. no_recording lists meeting days that count as lectures but have no recording (e.g. in-class exams). slots assign a recording to a section by its start time (used by voicememos.py): numbered slots follow the lecture schedule (NNN-lecture-MM); others are named by date. instructors: 'default' for the course; 'lectures' keyed by lecture id (010-lecture-12) or by number for all sections.",
+  "semester": "Spring 2027",
+  "first_day": "2027-02-01",
+  "meeting_days": ["Mon", "Wed", "Fri"],
+  "no_class": {
+    "2027-03-22": "Spring break",
+    "2027-03-24": "Spring break",
+    "2027-03-26": "Spring break"
+  },
+  "no_recording": {
+    "2027-03-03": "Midterm exam (in class)"
+  },
+  "timezone": "America/New_York",
+  "slots": [
+    {"name": "010", "start": "10:10", "days": ["Mon", "Wed", "Fri"], "numbered": true},
+    {"name": "011", "start": "11:15", "days": ["Mon", "Wed", "Fri"], "numbered": true},
+    {"name": "recitation", "start": "15:30", "days": ["Fri"], "numbered": false}
+  ],
+  "slot_tolerance_minutes": 40,
+  "instructors": {
+    "default": "Instructor",
+    "lectures": {
+      "010-lecture-12": "Co-instructor"
+    }
+  }
+}

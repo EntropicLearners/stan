@@ -14,10 +14,21 @@ Primary Functions
 .. autofunction:: stan.hybrid_query.compare_extractors.generate_student_answer
 """
 
+from pathlib import Path
+
 from .extract_regex import QueryProcessor
 from .extract_regex import IndexMatch
 from .extract_llm import QueryProcessorLLM, OllamaClient
 from .toc_navigator import TOCNavigator
+from stan.notation import primer
+
+# Answer generation with the notation primer.  The core conventions alone are
+# ~1.4k words of LaTeX-heavy text (~3k tokens), so Ollama's default context
+# would silently truncate the prompt; 8192 leaves room for a later-chapter
+# block, the index context, and the answer.
+ANSWER_NUM_CTX = 8192
+ANSWER_TIMEOUT = 120  # seconds; a longer prompt takes longer to process
+ANSWER_SYMBOL_LIMIT = 25
 
 
 def merge_results(matches_regex, matches_llm, score_threshold=10.0):
@@ -156,7 +167,8 @@ def merge_results(matches_regex, matches_llm, score_threshold=10.0):
 
 
 def generate_student_answer(query: str, matches, extracted_terms, ollama: OllamaClient,
-                          toc_navigator: TOCNavigator = None) -> tuple[str, str]:
+                          toc_navigator: TOCNavigator = None,
+                          notation: bool = True) -> tuple[str, str]:
     """
     Generate a friendly, helpful answer to guide students to textbook sections.
 
@@ -183,6 +195,10 @@ def generate_student_answer(query: str, matches, extracted_terms, ollama: Ollama
         OllamaClient instance for LLM text generation
     toc_navigator : TOCNavigator, optional
         Optional TOCNavigator for chapter/section context
+    notation : bool, optional
+        Ground the answer in the textbook's notation (default True).  The
+        primer covers the core chapters plus the chapters of the matched
+        pages, which needs ``toc_navigator``; without it, core only.
 
     Returns
     -------
@@ -202,6 +218,7 @@ def generate_student_answer(query: str, matches, extracted_terms, ollama: Ollama
         return "I couldn't find any relevant topics in the textbook index for your query.", ""
 
     # Build context from top matches, enriched with TOC information when available
+    chapters = set()
     context = "Top relevant topics from the textbook index:\n"
     for i, match in enumerate(matches[:5], 1):
         path = " > ".join(match.path) if len(match.path) > 1 else match.topic
@@ -219,6 +236,9 @@ def generate_student_answer(query: str, matches, extracted_terms, ollama: Ollama
                     location = toc_navigator.get_page_location_string(first_page)
                     if location:
                         context += f"\n   Location: {location}"
+                    entry = toc_navigator.get_location_for_page(first_page)
+                    if entry and entry.chapter_number:
+                        chapters.add(int(entry.chapter_number))
                 except (ValueError, AttributeError):
                     pass  # If page parsing fails, just skip location info
 
@@ -250,6 +270,14 @@ Format references clearly:
 
 Keep your response concise but comprehensive (3-5 sentences)."""
 
+    generate_options = {}
+    if notation:
+        system_message += "\n\n" + primer.grounding_block(
+            sorted(chapters), text=f"{query}\n{context}",
+            symbol_limit=ANSWER_SYMBOL_LIMIT,
+        )
+        generate_options = {"num_ctx": ANSWER_NUM_CTX, "timeout": ANSWER_TIMEOUT}
+
     prompt = f"""Student Question: "{query}"
 
 {context}
@@ -261,7 +289,8 @@ from the context above in a clean, easy-to-read format."""
 
     try:
         # Use low temperature to stay grounded in provided context and reduce hallucination
-        response = ollama.generate(prompt, system=system_message, temperature=0.4)
+        response = ollama.generate(prompt, system=system_message, temperature=0.4,
+                                   **generate_options)
         return response.strip(), context
     except Exception as e:
         # Fallback to simple formatted response
@@ -283,11 +312,11 @@ def compare_extractors():
     - Generated student-facing answers
 
     For production use, import merge_results() and generate_student_answer() directly.
-    See apps/query_student.py for an example of production usage.
+    See apps/query_student/query_student_run.py for an example of production usage.
     """
 
-    index_path = "../data/bindex_tab.json"
-    toc_path = "../data/ftoc_nav_tree.json"
+    index_path = Path(__file__).resolve().parents[1] / "data" / "bindex_tab.json"
+    toc_path = Path(__file__).resolve().parents[1] / "data" / "ftoc_nav_tree.json"
 
     # Initialize both processors
     print("Initializing processors...")

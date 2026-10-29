@@ -12,21 +12,21 @@ Cross-lecture aggregation finds recurring patterns across the semester.
 
 Usage:
     # Per-lecture analysis (dry run / execute)
-    python -m stan.lecture.analyze summary batch
-    python -m stan.lecture.analyze summary batch --go
-    python -m stan.lecture.analyze summary one transcript.txt
+    python -m stan.lecture_tools.analyze summary batch
+    python -m stan.lecture_tools.analyze summary batch --go
+    python -m stan.lecture_tools.analyze summary one transcript.txt
 
     # Cross-lecture aggregation
-    python -m stan.lecture.analyze aggregate questions --go
+    python -m stan.lecture_tools.analyze aggregate questions --go
 
     # All per-lecture analyses at once
-    python -m stan.lecture.analyze all batch --go
+    python -m stan.lecture_tools.analyze all batch --go
 
     # Semester overview report
-    python -m stan.lecture.analyze report summary
-    python -m stan.lecture.analyze report questions
+    python -m stan.lecture_tools.analyze report summary
+    python -m stan.lecture_tools.analyze report questions
 
-Requires: Ollama running locally (ollama pull llama3.1:8B)
+Requires: Ollama running locally (ollama pull gemma4:31b)
 """
 from __future__ import annotations
 
@@ -37,7 +37,10 @@ import sys
 import time
 import urllib.request
 import urllib.error
+from dataclasses import dataclass
 from pathlib import Path
+
+from stan.notation import primer
 
 # ── Paths ────────────────────────────────────────────────────────────
 
@@ -50,23 +53,72 @@ DEFAULT_ANALYSIS_DIR = (
 LECTURE_ORDER_FILE = (
     Path(__file__).resolve().parents[1] / "data" / "lectures" / "lecture_order.json"
 )
+LECTURE_CHAPTERS_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "lectures" / "lecture_chapters.json"
+)
+COURSE_SCHEDULE_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "lectures" / "course_schedule.json"
+)
 
 # ── Constants ────────────────────────────────────────────────────────
 
-# llama3.1:8B reliably follows structured JSON schemas for transcript analysis.
+# gemma4:31b is the default as of 2026-09-08: 19 GB of weights leaves enough
+# room on a 24 GB card for a 16k context, and analysis runs offline in batch
+# so the slower generation costs little.  The Spring 2026 results were
+# produced with llama3.1:8B, which is still available with --model when
+# reproducing them.
+#
 # command-r7b was tested (2026-02-18) and produced hallucinated structures
 # (fake Q&A datasets, fabricated exam problems), but that test ran without
 # num_ctx so the model only saw ~2048 tokens of context.  The failures may
-# have been caused by truncation, not model capability.  Worth re-testing
-# command-r7b with full context.  Override with --model if experimenting.
-MODEL = "llama3.1:8B"
+# have been caused by truncation, not model capability.
+MODEL = "gemma4:31b"
 OLLAMA_URL = "http://localhost:11434"
-OLLAMA_TIMEOUT = 600  # seconds — complex prompts (questions, confusion) with full context need time
-NUM_CTX = 16384  # context window tokens — transcripts are ~13k tokens
+OLLAMA_TIMEOUT = 1800  # seconds — gemma4:31b partly offloads to CPU (see MODEL note)
+
+# Context window.  This must fit the prompt AND leave room for the answer.
+# A timestamped transcript ("segments" input, used by confusion and questions)
+# runs ~12.5k tokens for a 55-minute lecture, so the previous 16384 left under
+# 4k for output and the models quietly truncated: on 010-lecture-02, confusion
+# returned 1 point at 16384 versus 5 at 32768, and question extraction
+# returned an empty list at 16384 versus 12-60 candidates at 32768.  The
+# failure is silent -- schema-valid JSON with empty arrays -- so it reads as
+# "nothing found in this lecture" rather than as an error.
+NUM_CTX = 32768
+
+# Output cap per analysis type, in tokens.  A schema-constrained response
+# should never fail to parse, but a model caught in a repetition loop
+# generates until the context is full (888 s on one summary) and the
+# truncated JSON then fails.  gemma4 THINKS by default, and the hidden
+# thinking (~1.2-1.4k tokens on a summary) counts toward num_predict along
+# with the ~800-token answer: a 2048 cap left some runs with an empty
+# response.  Summaries measured 1.7-2.0k tokens in total (2026-10-03); 6144
+# leaves 3x headroom and still bounds a runaway at ~4 minutes (~27 tok/s).
+# Types not listed are uncapped.
+NUM_PREDICT = {"summary": 6144}
+
+# Added to the temperature on each retry of a failed generation.  At 0.2 a
+# retry often reproduces the same failure token for token.
+RETRY_TEMPERATURE_STEP = 0.3
+
+# Retries per analysis type (default 1).  About 1 in 5 grounded summary
+# attempts writes single-backslash LaTeX and is rejected (Fall 2026
+# regeneration, 2026-10-03), so summaries get a third attempt.
+RETRIES = {"summary": 2}
 
 MIN_WORDS_THRESHOLD = 100  # skip transcripts shorter than this (exams, empty)
 
 ANALYSIS_TYPES = ("summary", "questions", "confusion", "anecdotes")
+
+# Analysis types whose prompts carry the textbook notation primer (see
+# stan.notation).  Summaries write equations and technical terms, so they
+# drift into the model's own notation without it; the other types quote or
+# paraphrase the transcript and are left unchanged for now.
+NOTATION_TYPES = ("summary",)
+
+# Cap on symbol rows in the grounding block.  Rows are filtered to those whose
+# meaning appears in the transcript, so this rarely binds.
+NOTATION_SYMBOL_LIMIT = 60
 
 # Map analysis type -> output subdirectory name
 OUTPUT_SUBDIRS = {
@@ -101,6 +153,23 @@ You MUST respond with valid JSON only, no other text. Use this exact schema:
 
 Note: The input is an automated speech-to-text transcription and may contain \
 minor errors or awkward phrasing. Interpret generously."""
+
+# Appended to SUMMARY_SYSTEM, ahead of the notation primer, when notation
+# grounding is on.  The speaker's spoken notation ("s sub k", "m dot") is
+# exactly what the summary should NOT copy.
+SUMMARY_NOTATION_NOTE = """\
+Write each entry of "key_equations" as LaTeX between $...$, in the textbook's \
+notation below (for example $\\dot{M}_k \\hat{S}_k$, not m_dot_k * s_k). In \
+"title", "topics", "key_concepts", and "summary", use the textbook's names for \
+quantities and put any symbol in $...$. The transcript records how the lecture \
+was spoken, not how the book writes it: translate into the book's notation, \
+and correct speech-to-text misspellings of names (the transcripts write \
+"Joule-Thompson"; the book writes "Joule-Thomson").
+
+JSON escaping: inside a JSON string every LaTeX backslash is written TWICE, \
+for example "$\\\\hat{H} = \\\\hat{U} + P\\\\hat{V}$". A single backslash is an \
+error. Write each equation once, as the book would; if you are unsure of an \
+equation, leave it out rather than revising it inside the string."""
 
 QUESTIONS_EXTRACT_SYSTEM = """\
 You are an expert teaching assistant analyzing a university lecture transcript \
@@ -321,12 +390,273 @@ You MUST respond with valid JSON only. Use this schema:
   "total_items": 68
 }"""
 
-# Prompt config: maps analysis type -> (system_prompt, input_format, temperature)
+# ── Output schemas ───────────────────────────────────────────────────
+#
+# Each prompt already describes its JSON shape in prose, which llama3.1:8B
+# followed reliably.  Later models do not: gemma4:e4b and gemma4:31b both
+# ignore the prose schema and answer in a shape of their own choosing (an
+# extract-questions call came back as a lecture summary), because Gemma's
+# chat template has no distinct system role and Ollama folds the system text
+# into the user turn, where it competes with 12k tokens of transcript.
+#
+# Passing a real JSON Schema as Ollama's ``format`` constrains decoding, so
+# the shape no longer depends on the model choosing to cooperate.  The prose
+# schemas stay in the prompts: they still convey intent and field semantics,
+# which the grammar cannot.
+#
+# Schemas deliberately omit minItems.  It is expressible, but forcing a
+# minimum count invites invented content when a lecture genuinely has (say)
+# no jokes in it.
+
+_TIMESTAMP = {"type": "string", "description": "Timestamp as H:MM:SS"}
+_SPEAKER = {"type": "string", "enum": ["student", "instructor"]}
+
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "topics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["name", "description"],
+            },
+        },
+        "key_concepts": {"type": "array", "items": {"type": "string"}},
+        "key_equations": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+        "lecture_type": {
+            "type": "string",
+            "enum": ["new_material", "review", "problem_solving",
+                     "demonstration", "mixed"],
+        },
+    },
+    "required": ["title", "topics", "key_concepts", "key_equations",
+                 "summary", "lecture_type"],
+}
+
+QUESTIONS_EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "timestamp": _TIMESTAMP,
+                    "speaker": _SPEAKER,
+                    "verbatim": {"type": "string"},
+                },
+                "required": ["timestamp", "speaker", "verbatim"],
+            },
+        },
+        "candidate_count": {"type": "integer"},
+    },
+    "required": ["candidates", "candidate_count"],
+}
+
+QUESTIONS_FILTER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "timestamp": _TIMESTAMP,
+                    "speaker": _SPEAKER,
+                    "type": {
+                        "type": "string",
+                        "enum": ["conceptual", "clarification",
+                                 "procedural", "socratic"],
+                    },
+                    "question_text": {"type": "string"},
+                    "context": {"type": "string"},
+                    "topic": {"type": "string"},
+                    "significance": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low"],
+                    },
+                },
+                "required": ["timestamp", "speaker", "type", "question_text",
+                             "context", "topic", "significance"],
+            },
+        },
+        "question_count": {"type": "integer"},
+        "student_question_count": {"type": "integer"},
+        "most_questioned_topics": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["questions", "question_count", "student_question_count",
+                 "most_questioned_topics"],
+}
+
+CONFUSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "confusion_points": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "timestamp": _TIMESTAMP,
+                    "topic": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "description": {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["minor", "moderate", "significant"],
+                    },
+                },
+                "required": ["timestamp", "topic", "evidence",
+                             "description", "severity"],
+            },
+        },
+        "confusion_count": {"type": "integer"},
+        "most_confusing_topics": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["confusion_points", "confusion_count", "most_confusing_topics"],
+}
+
+ANECDOTES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["anecdote", "analogy", "joke",
+                                 "real_world_example", "historical_note"],
+                    },
+                    "description": {"type": "string"},
+                    "quote": {"type": "string"},
+                    "related_topic": {"type": "string"},
+                    "pedagogical_purpose": {"type": "string"},
+                },
+                "required": ["type", "description", "quote",
+                             "related_topic", "pedagogical_purpose"],
+            },
+        },
+        "item_count": {"type": "integer"},
+    },
+    "required": ["items", "item_count"],
+}
+
+AGGREGATE_QUESTIONS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "recurring_topics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "frequency": {"type": "integer"},
+                    "lectures_appeared_in": {
+                        "type": "array", "items": {"type": "integer"},
+                    },
+                    "representative_questions": {
+                        "type": "array", "items": {"type": "string"},
+                    },
+                    "trend": {
+                        "type": "string",
+                        "enum": ["increasing", "decreasing",
+                                 "stable", "concentrated"],
+                    },
+                },
+                "required": ["topic", "frequency", "lectures_appeared_in",
+                             "representative_questions", "trend"],
+            },
+        },
+        "engagement_trend": {"type": "string"},
+        "total_questions": {"type": "integer"},
+        "total_student_questions": {"type": "integer"},
+    },
+    "required": ["recurring_topics", "engagement_trend",
+                 "total_questions", "total_student_questions"],
+}
+
+AGGREGATE_CONFUSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "persistent_difficulties": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "total_occurrences": {"type": "integer"},
+                    "lectures": {"type": "array", "items": {"type": "integer"}},
+                    "avg_severity": {
+                        "type": "string",
+                        "enum": ["minor", "moderate", "significant"],
+                    },
+                    "description": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                },
+                "required": ["topic", "total_occurrences", "lectures",
+                             "avg_severity", "description", "suggestion"],
+            },
+        },
+        "semester_trend": {"type": "string"},
+        "most_confusing_topics": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["persistent_difficulties", "semester_trend",
+                 "most_confusing_topics"],
+}
+
+AGGREGATE_ANECDOTES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "by_type": {
+            "type": "object",
+            "properties": {
+                "anecdote": {"type": "integer"},
+                "analogy": {"type": "integer"},
+                "joke": {"type": "integer"},
+                "real_world_example": {"type": "integer"},
+                "historical_note": {"type": "integer"},
+            },
+            "required": ["anecdote", "analogy", "joke",
+                         "real_world_example", "historical_note"],
+        },
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "related_topic": {"type": "string"},
+                    "lecture": {"type": "integer"},
+                },
+                "required": ["type", "description", "related_topic", "lecture"],
+            },
+        },
+        "total_items": {"type": "integer"},
+    },
+    "required": ["by_type", "highlights", "total_items"],
+}
+
+AGGREGATE_SCHEMAS = {
+    "questions": AGGREGATE_QUESTIONS_SCHEMA,
+    "confusion": AGGREGATE_CONFUSION_SCHEMA,
+    "anecdotes": AGGREGATE_ANECDOTES_SCHEMA,
+}
+
+
+# Prompt config: analysis type -> (system_prompt, input_format, temperature, schema)
 # Note: "questions" is handled separately via two-pass (extract → filter).
 ANALYSIS_CONFIG = {
-    "summary": (SUMMARY_SYSTEM, "text", 0.2),
-    "confusion": (CONFUSION_SYSTEM, "segments", 0.2),
-    "anecdotes": (ANECDOTES_SYSTEM, "text", 0.4),
+    "summary": (SUMMARY_SYSTEM, "text", 0.2, SUMMARY_SCHEMA),
+    "confusion": (CONFUSION_SYSTEM, "segments", 0.2, CONFUSION_SCHEMA),
+    "anecdotes": (ANECDOTES_SYSTEM, "text", 0.4, ANECDOTES_SCHEMA),
 }
 
 AGGREGATE_PROMPTS = {
@@ -341,7 +671,7 @@ AGGREGATE_PROMPTS = {
 class OllamaClient:
     """HTTP client for Ollama API using stdlib urllib.
 
-    Adapted from the pattern in stan/run/query_rewrite_llm.py.
+    Adapted from the pattern in stan/hybrid_query/extract_llm.py.
     Uses longer timeouts for large transcript analysis.
     """
 
@@ -356,8 +686,15 @@ class OllamaClient:
         temperature: float = 0.2,
         timeout: int = OLLAMA_TIMEOUT,
         json_mode: bool = False,
+        schema: dict | None = None,
+        num_predict: int | None = None,
     ) -> str:
-        """Generate text completion. Returns raw response string."""
+        """Generate text completion. Returns raw response string.
+
+        Passing ``schema`` (a JSON Schema) constrains decoding to that shape,
+        which is far more reliable than asking for JSON in the prompt.
+        ``json_mode`` is the weaker fallback: valid JSON, arbitrary shape.
+        """
         url = f"{self.base_url}/api/generate"
         payload = {
             "model": self.model,
@@ -365,9 +702,13 @@ class OllamaClient:
             "stream": False,
             "options": {"temperature": temperature, "num_ctx": NUM_CTX},
         }
+        if num_predict is not None:
+            payload["options"]["num_predict"] = num_predict
         if system:
             payload["system"] = system
-        if json_mode:
+        if schema is not None:
+            payload["format"] = schema
+        elif json_mode:
             payload["format"] = "json"
 
         data = json.dumps(payload).encode("utf-8")
@@ -388,13 +729,24 @@ class OllamaClient:
         temperature: float = 0.2,
         timeout: int = OLLAMA_TIMEOUT,
         retries: int = 1,
+        schema: dict | None = None,
+        num_predict: int | None = None,
     ) -> dict:
         """Generate a response and parse it as JSON.
 
-        Strips markdown code fences and retries on parse failure.
+        Strips markdown code fences and retries on parse failure.  When
+        ``schema`` is given the response shape is grammar-constrained, so
+        fence-stripping should never trigger.  Parse failures still happen
+        when the model loops until ``num_predict`` cuts it off, and a parse
+        can succeed with control characters from mis-escaped LaTeX; both are
+        retried, at a higher temperature so the retry does not retrace the
+        same path.
         """
         for attempt in range(1 + retries):
-            raw = self.generate(prompt, system, temperature, timeout, json_mode=True)
+            attempt_temp = temperature + RETRY_TEMPERATURE_STEP * attempt
+            raw = self.generate(prompt, system, attempt_temp, timeout,
+                                json_mode=True, schema=schema,
+                                num_predict=num_predict)
             cleaned = raw.strip()
             # Strip markdown code fences (```json ... ```)
             if cleaned.startswith("```"):
@@ -402,8 +754,10 @@ class OllamaClient:
                 lines = [l for l in lines if not l.strip().startswith("```")]
                 cleaned = "\n".join(lines)
             try:
-                return json.loads(cleaned)
+                parsed = json.loads(cleaned)
             except json.JSONDecodeError:
+                parsed = None
+            if parsed is None:
                 if attempt < retries:
                     print("    [RETRY]  JSON parse failed, retrying...")
                     continue
@@ -411,34 +765,145 @@ class OllamaClient:
                 match = re.search(r"\{.*\}", cleaned, re.DOTALL)
                 if match:
                     try:
-                        return json.loads(match.group())
+                        parsed = json.loads(match.group())
                     except json.JSONDecodeError:
                         pass
-                raise ValueError(
-                    f"Could not parse JSON from LLM response:\n{raw[:500]}"
-                )
+                if parsed is None:
+                    raise ValueError(
+                        f"Could not parse JSON from LLM response:\n{raw[:500]}"
+                    )
+            if not _has_control_chars(parsed):
+                return parsed
+            if attempt < retries:
+                print("    [RETRY]  Control characters in response "
+                      "(single-backslash LaTeX), retrying...")
+                continue
+            raise ValueError(
+                "Response contains control characters (single-backslash "
+                f"LaTeX):\n{raw[:500]}"
+            )
+
+
+def _has_control_chars(node) -> bool:
+    """True if any string in a parsed response holds a tab, form feed, etc.
+
+    These are the signature of LaTeX written with single backslashes inside
+    JSON: "\\frac" and "\\text" decode as form feed + "rac" and tab + "ext".
+    The JSON grammar Ollama enforces allows only those escapes, so a model in
+    that mode cannot write "\\underline" or "\\hat" at all and tends to loop on
+    the few commands it can (observed on 010-lecture-03, 2026-10-03).
+    """
+    if isinstance(node, str):
+        return any(c in node for c in "\t\f\b\r\v")
+    if isinstance(node, dict):
+        return any(_has_control_chars(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_control_chars(v) for v in node)
+    return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
-def extract_lecture_number(filename: str) -> int | None:
-    """Extract the lecture number (e.g. 5) from a transcript filename.
+@dataclass(frozen=True)
+class LectureID:
+    """Identifies one lecture recording, with or without a section.
 
-    Pattern: CHEG231-010_Chemical_Engineering_Thermodynamics_NNN_1_HASH.{txt,json}
+    Two naming conventions are in play.  The Spring 2026 corpus came from
+    Panopto exports with a single global capture number and no usable section
+    marker (``section=None``).  Recordings from Fall 2026 onward are captured
+    per section, so the same lecture is delivered twice and the section is
+    part of the identity — section 010 lecture 2 and section 011 lecture 2
+    are different recordings of the same material and must not overwrite
+    each other.
     """
-    match = re.search(r"_(\d{3})_1_", filename)
+
+    section: str | None
+    number: int
+
+    @property
+    def key(self) -> str:
+        """Filename-safe identifier used for analysis output paths."""
+        if self.section is None:
+            return f"lecture_{self.number:03d}"
+        return f"{self.section}-lecture-{self.number:02d}"
+
+    @property
+    def label(self) -> str:
+        """Short human-readable label for console output and reports."""
+        if self.section is None:
+            return f"Lecture {self.number:03d}"
+        return f"Sec {self.section} Lecture {self.number:02d}"
+
+    @property
+    def name(self) -> str:
+        """Bare identifier for interpolation mid-sentence in prompts."""
+        if self.section is None:
+            return str(self.number)
+        return f"{self.number}, section {self.section}"
+
+    @property
+    def sort_key(self) -> tuple[str, int]:
+        """Total order over both conventions: legacy corpus first, then sections.
+
+        Defined explicitly rather than via ``order=True`` because a generated
+        comparison would compare ``section`` directly and raise ``TypeError``
+        as soon as a legacy id (``None``) met a sectioned one.
+        """
+        return (self.section or "", self.number)
+
+    def __lt__(self, other: "LectureID") -> bool:
+        if not isinstance(other, LectureID):
+            return NotImplemented
+        return self.sort_key < other.sort_key
+
+    @property
+    def prompt_label(self) -> str:
+        """Lecture designation as presented to the LLM.
+
+        The legacy form is kept verbatim ("Lecture N of 39") because the
+        analysis prompts were tuned against it.
+        """
+        if self.section is None:
+            return f"Lecture {self.number} of 39"
+        return f"Lecture {self.number}, section {self.section}"
+
+
+# Panopto export: CHEG231-010_Chemical_Engineering_Thermodynamics_NNN_1_HASH
+_LEGACY_PATTERN = re.compile(r"_(\d{3})_1_")
+# Per-section capture: NNN-lecture-MM (e.g. 010-lecture-02)
+_SECTION_PATTERN = re.compile(r"^(\d{3})-lecture-(\d+)", re.IGNORECASE)
+
+
+def extract_lecture_id(filename: str) -> LectureID | None:
+    """Parse a LectureID from a transcript or analysis filename.
+
+    Recognizes both the legacy Panopto pattern and the per-section pattern;
+    returns None if neither matches.
+    """
+    match = _SECTION_PATTERN.match(filename)
     if match:
-        return int(match.group(1))
+        return LectureID(section=match.group(1), number=int(match.group(2)))
+
+    match = _LEGACY_PATTERN.search(filename)
+    if match:
+        return LectureID(section=None, number=int(match.group(1)))
+
+    # Analysis outputs are named from LectureID.key, so re-parse that form too.
+    match = re.match(r"^lecture_(\d{3})_", filename)
+    if match:
+        return LectureID(section=None, number=int(match.group(1)))
+
     return None
 
 
 def find_transcripts(
     transcript_dir: Path,
     filter_str: str | None = None,
-) -> list[tuple[int, Path, Path]]:
-    """Find transcript file pairs and return sorted (lecture_num, txt, json).
+) -> list[tuple[LectureID, Path, Path]]:
+    """Find transcript file pairs and return sorted (lecture_id, txt, json).
 
-    Only returns pairs where both .txt and .json exist.
+    Only returns pairs where both .txt and .json exist.  Sections sort
+    together, with the legacy unsectioned corpus first.
     """
     txt_files = sorted(transcript_dir.glob("*.txt"))
     results = []
@@ -448,10 +913,10 @@ def find_transcripts(
             continue
         if filter_str and filter_str not in txt_path.name:
             continue
-        num = extract_lecture_number(txt_path.name)
-        if num is not None:
-            results.append((num, txt_path, json_path))
-    results.sort(key=lambda x: x[0])
+        lid = extract_lecture_id(txt_path.name)
+        if lid is not None:
+            results.append((lid, txt_path, json_path))
+    results.sort(key=lambda x: x[0].sort_key)
     return results
 
 
@@ -493,51 +958,139 @@ def is_valid_lecture(txt_path: Path) -> tuple[bool, int]:
 
 
 def output_path(
-    analysis_dir: Path, analysis_type: str, lecture_num: int
+    analysis_dir: Path, analysis_type: str, lid: LectureID
 ) -> Path:
     """Compute output path for a per-lecture analysis result."""
     subdir = OUTPUT_SUBDIRS[analysis_type]
-    return analysis_dir / subdir / f"lecture_{lecture_num:03d}_{analysis_type}.json"
+    return analysis_dir / subdir / f"{lid.key}_{analysis_type}.json"
 
 
 def make_envelope(
-    lecture_num: int,
+    lid: LectureID,
     source_file: str,
     analysis_type: str,
     model: str,
     analysis_seconds: float,
     result: dict,
+    notation: dict | None = None,
+    instructor: str | None = None,
 ) -> dict:
-    """Wrap an LLM result in a consistent metadata envelope."""
-    return {
-        "lecture_number": lecture_num,
+    """Wrap an LLM result in a consistent metadata envelope.
+
+    ``lecture_number`` is retained unchanged so the Spring 2026 result files
+    stay readable; ``lecture_id`` and ``section`` are the fields that
+    disambiguate multi-section semesters.
+    """
+    envelope = {
+        "lecture_id": lid.key,
+        "section": lid.section,
+        "lecture_number": lid.number,
         "source_file": source_file,
         "analysis_type": analysis_type,
         "model": model,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "analysis_seconds": round(analysis_seconds, 2),
-        "result": result,
     }
+    if instructor is not None:
+        envelope["instructor"] = instructor
+    if notation is not None:
+        envelope["notation"] = notation
+    envelope["result"] = result
+    return envelope
+
+
+# ── Notation grounding ───────────────────────────────────────────────
+
+def lecture_instructor(lid: LectureID) -> str | None:
+    """Who taught a lecture, if not the course's usual instructor.
+
+    From course_schedule.json "instructors": "lectures" keyed by lecture id
+    (010-lecture-20) or by number (both sections).  Returns None for the
+    default instructor and for the legacy corpus.
+    """
+    if lid.section is None or not COURSE_SCHEDULE_FILE.exists():
+        return None
+    data = json.loads(COURSE_SCHEDULE_FILE.read_text(encoding="utf-8"))
+    info = data.get("instructors", {})
+    lectures = info.get("lectures", {})
+    name = lectures.get(lid.key) or lectures.get(str(lid.number))
+    return name if name and name != info.get("default") else None
+
+
+def instructor_note(lid: LectureID) -> str:
+    """Prompt sentence for a lecture taught by someone else ('' otherwise).
+
+    The system prompts say "the instructor"; without this, a summary of a
+    co-instructor's lecture would read as the usual instructor's.
+    """
+    name = lecture_instructor(lid)
+    if not name:
+        return ""
+    return (f"Note: this lecture was taught by {name}, a co-instructor, not the "
+            f"course's usual instructor. Refer to the lecturer as {name}.\n\n")
+
+
+def lecture_chapters(lid: LectureID) -> list[int]:
+    """Textbook chapters a lecture covers, from lecture_chapters.json.
+
+    Looks up the full lecture id first (an override for one section), then the
+    lecture number (shared by sections taught in parallel), then "default".
+    The core chapters (1-4) are always added by stan.notation, so an unmapped
+    lecture still gets core grounding.
+    """
+    if not LECTURE_CHAPTERS_FILE.exists():
+        return []
+    data = json.loads(LECTURE_CHAPTERS_FILE.read_text(encoding="utf-8"))
+    overrides = data.get("overrides", {})
+    if lid.key in overrides:
+        return [int(c) for c in overrides[lid.key]]
+    if lid.section is not None:
+        lectures = data.get("lectures", {})
+        if str(lid.number) in lectures:
+            return [int(c) for c in lectures[str(lid.number)]]
+    return [int(c) for c in data.get("default", [])]
+
+
+def notation_grounding(
+    lid: LectureID, transcript: str, chapters: list[int] | None = None
+) -> tuple[str, dict]:
+    """System-prompt addition and provenance record for one lecture."""
+    chapters = lecture_chapters(lid) if chapters is None else chapters
+    block = primer.grounding_block(
+        chapters, text=transcript, symbol_limit=NOTATION_SYMBOL_LIMIT
+    )
+    record = {
+        "chapters": primer.chapters_in_scope(chapters),
+        "primers": primer.primer_version(),
+    }
+    return block, record
 
 
 # ── Core analysis ────────────────────────────────────────────────────
 
 def analyze_one(
     analysis_type: str,
-    lecture_num: int,
+    lid: LectureID,
     txt_path: Path,
     json_path: Path,
     client: OllamaClient,
     analysis_dir: Path,
+    notation: bool = True,
+    chapters: list[int] | None = None,
 ) -> Path:
-    """Run a single analysis type on one lecture. Returns the output path."""
+    """Run a single analysis type on one lecture. Returns the output path.
+
+    With ``notation`` (the default), analysis types in NOTATION_TYPES get the
+    textbook notation primer for the lecture's chapters appended to their
+    system prompt; ``chapters`` overrides lecture_chapters.json.
+    """
     # Questions uses a two-pass pipeline (extract → filter)
     if analysis_type == "questions":
         return _analyze_questions_two_pass(
-            lecture_num, txt_path, json_path, client, analysis_dir
+            lid, txt_path, json_path, client, analysis_dir
         )
 
-    system_prompt, input_format, temperature = ANALYSIS_CONFIG[analysis_type]
+    system_prompt, input_format, temperature, schema = ANALYSIS_CONFIG[analysis_type]
 
     # Build the user prompt with the appropriate input
     if input_format == "text":
@@ -547,24 +1100,33 @@ def analyze_one(
         content = format_segments_with_timestamps(segments)
 
     user_prompt = (
-        f"Analyze this lecture transcript (Lecture {lecture_num} of 39) "
+        f"Analyze this lecture transcript ({lid.prompt_label}) "
         f"and produce a structured JSON response.\n\n"
+        f"{instructor_note(lid)}"
         f"TRANSCRIPT:\n{content}"
     )
 
-    print(f"  [{analysis_type.upper():10s}] Lecture {lecture_num:03d}...", end="", flush=True)
+    notation_record = None
+    if notation and analysis_type in NOTATION_TYPES:
+        block, notation_record = notation_grounding(lid, content, chapters)
+        system_prompt = f"{system_prompt}\n\n{SUMMARY_NOTATION_NOTE}\n\n{block}"
+
+    print(f"  [{analysis_type.upper():10s}] {lid.label:24s}...", end="", flush=True)
     t0 = time.time()
     result = client.generate_json(
-        user_prompt, system=system_prompt, temperature=temperature
+        user_prompt, system=system_prompt, temperature=temperature,
+        schema=schema, num_predict=NUM_PREDICT.get(analysis_type),
+        retries=RETRIES.get(analysis_type, 1),
     )
     elapsed = time.time() - t0
     print(f" {elapsed:.1f}s")
 
     # Wrap in envelope and write
-    out = output_path(analysis_dir, analysis_type, lecture_num)
+    out = output_path(analysis_dir, analysis_type, lid)
     out.parent.mkdir(parents=True, exist_ok=True)
     envelope = make_envelope(
-        lecture_num, txt_path.name, analysis_type, client.model, elapsed, result
+        lid, txt_path.name, analysis_type, client.model, elapsed, result,
+        notation=notation_record, instructor=lecture_instructor(lid),
     )
     out.write_text(json.dumps(envelope, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")
@@ -572,7 +1134,7 @@ def analyze_one(
 
 
 def _analyze_questions_two_pass(
-    lecture_num: int,
+    lid: LectureID,
     txt_path: Path,
     json_path: Path,
     client: OllamaClient,
@@ -594,15 +1156,17 @@ def _analyze_questions_two_pass(
     # ── Pass 1: Extract candidates ──
     extract_prompt = (
         f"Extract all genuine questions from this lecture transcript "
-        f"(Lecture {lecture_num} of 39). Copy each question VERBATIM.\n\n"
+        f"({lid.prompt_label}). Copy each question VERBATIM.\n\n"
+        f"{instructor_note(lid)}"
         f"TRANSCRIPT:\n{content}"
     )
 
-    print(f"  [QUESTIONS ] Lecture {lecture_num:03d} pass 1 (extract)...",
+    print(f"  [QUESTIONS ] {lid.label:24s} pass 1 (extract)...",
           end="", flush=True)
     t0 = time.time()
     candidates = client.generate_json(
-        extract_prompt, system=QUESTIONS_EXTRACT_SYSTEM, temperature=0.2
+        extract_prompt, system=QUESTIONS_EXTRACT_SYSTEM, temperature=0.2,
+        schema=QUESTIONS_EXTRACT_SCHEMA,
     )
     t1 = time.time()
     n_candidates = len(candidates.get("candidates", []))
@@ -612,14 +1176,15 @@ def _analyze_questions_two_pass(
     candidate_text = json.dumps(candidates.get("candidates", []), indent=1)
     filter_prompt = (
         f"Here are {n_candidates} candidate questions extracted from Lecture "
-        f"{lecture_num}. Classify, rank by significance, and keep the 5–15 "
-        f"most important.\n\nCANDIDATES:\n{candidate_text}"
+        f"{lid.name}. Classify, rank by significance, and keep the 5–15 "
+        f"most important.\n\n{instructor_note(lid)}CANDIDATES:\n{candidate_text}"
     )
 
-    print(f"  [QUESTIONS ] Lecture {lecture_num:03d} pass 2 (filter)...",
+    print(f"  [QUESTIONS ] {lid.label:24s} pass 2 (filter)...",
           end="", flush=True)
     result = client.generate_json(
-        filter_prompt, system=QUESTIONS_FILTER_SYSTEM, temperature=0.2
+        filter_prompt, system=QUESTIONS_FILTER_SYSTEM, temperature=0.2,
+        schema=QUESTIONS_FILTER_SCHEMA,
     )
     t2 = time.time()
     n_final = len(result.get("questions", []))
@@ -630,10 +1195,11 @@ def _analyze_questions_two_pass(
     result["candidates_extracted"] = n_candidates
 
     # Wrap in envelope and write
-    out = output_path(analysis_dir, "questions", lecture_num)
+    out = output_path(analysis_dir, "questions", lid)
     out.parent.mkdir(parents=True, exist_ok=True)
     envelope = make_envelope(
-        lecture_num, txt_path.name, "questions", client.model, elapsed, result
+        lid, txt_path.name, "questions", client.model, elapsed, result,
+        instructor=lecture_instructor(lid),
     )
     out.write_text(json.dumps(envelope, indent=2, ensure_ascii=False) + "\n",
                    encoding="utf-8")
@@ -648,6 +1214,8 @@ def analyze_batch(
     go: bool = False,
     filter_str: str | None = None,
     overwrite: bool = False,
+    notation: bool = True,
+    chapters: list[int] | None = None,
 ) -> None:
     """Batch-analyze transcripts for a single analysis type."""
     transcripts = find_transcripts(transcript_dir, filter_str)
@@ -658,29 +1226,32 @@ def analyze_batch(
     # Classify lectures
     valid = []
     skipped_short = []
-    for num, txt, jsn in transcripts:
+    for lid, txt, jsn in transcripts:
         ok, wc = is_valid_lecture(txt)
         if ok:
-            valid.append((num, txt, jsn, wc))
+            valid.append((lid, txt, jsn, wc))
         else:
-            skipped_short.append((num, wc))
+            skipped_short.append((lid, wc))
 
     print(f"Found {len(transcripts)} transcript(s) "
           f"({len(valid)} valid, {len(skipped_short)} skipped)")
     print(f"Model: {client.model}")
     print(f"Analysis: {analysis_type}")
+    if analysis_type in NOTATION_TYPES:
+        print(f"Notation primer: {'on' if notation else 'off'}"
+              + (f" (chapters {chapters})" if notation and chapters else ""))
     print()
 
     if not go:
         print("Dry run (pass --go to analyze):\n")
-        for num, wc in skipped_short:
-            print(f"  [SKIP]    Lecture {num:03d} ({wc} words)")
-        for num, txt, jsn, wc in valid:
-            out = output_path(analysis_dir, analysis_type, num)
+        for lid, wc in skipped_short:
+            print(f"  [SKIP]    {lid.label:24s} ({wc} words)")
+        for lid, txt, jsn, wc in valid:
+            out = output_path(analysis_dir, analysis_type, lid)
             if out.exists() and not overwrite:
-                print(f"  [EXISTS]  Lecture {num:03d} (already analyzed)")
+                print(f"  [EXISTS]  {lid.label:24s} (already analyzed)")
             else:
-                print(f"  [PENDING] Lecture {num:03d} ({wc} words)")
+                print(f"  [PENDING] {lid.label:24s} ({wc} words)")
         print(f"\nRerun with --go to analyze to "
               f"{analysis_dir / OUTPUT_SUBDIRS[analysis_type]}")
         return
@@ -690,22 +1261,49 @@ def analyze_batch(
     failed = 0
     t0_total = time.time()
 
-    for num, txt, jsn, wc in valid:
-        out = output_path(analysis_dir, analysis_type, num)
+    for lid, txt, jsn, wc in valid:
+        out = output_path(analysis_dir, analysis_type, lid)
         if out.exists() and not overwrite:
-            print(f"  [SKIP]       Lecture {num:03d} (already analyzed)")
+            print(f"  [SKIP]       {lid.label:24s} (already analyzed)")
             skipped += 1
             continue
         try:
-            analyze_one(analysis_type, num, txt, jsn, client, analysis_dir)
+            analyze_one(analysis_type, lid, txt, jsn, client, analysis_dir,
+                        notation=notation, chapters=chapters)
             success += 1
         except Exception as e:
-            print(f"  [FAIL]       Lecture {num:03d}: {e}")
+            print(f"  [FAIL]       {lid.label:24s}: {e}")
             failed += 1
 
     elapsed_total = time.time() - t0_total
     print(f"\n{success} analyzed, {skipped} skipped, {failed} failed "
           f"({elapsed_total:.0f}s total)")
+
+
+# ── Result loading ───────────────────────────────────────────────────
+
+def find_results(
+    subdir: Path,
+    analysis_type: str,
+    section: str | None = None,
+) -> list[tuple[LectureID, Path]]:
+    """Find per-lecture result files, sorted, optionally scoped to a section.
+
+    Matches both naming conventions and excludes the ``semester_*``
+    aggregate outputs that live in the same directory.
+    """
+    results = []
+    for f in sorted(subdir.glob(f"*_{analysis_type}.json")):
+        if f.name.startswith("semester_"):
+            continue
+        lid = extract_lecture_id(f.name)
+        if lid is None:
+            continue
+        if section is not None and lid.section != section:
+            continue
+        results.append((lid, f))
+    results.sort(key=lambda x: x[0].sort_key)
+    return results
 
 
 # ── Aggregation ──────────────────────────────────────────────────────
@@ -715,6 +1313,7 @@ def aggregate(
     analysis_dir: Path,
     client: OllamaClient,
     go: bool = False,
+    section: str | None = None,
 ) -> None:
     """Load all per-lecture results for a type and find cross-lecture patterns."""
     if analysis_type not in AGGREGATE_PROMPTS:
@@ -725,25 +1324,29 @@ def aggregate(
     if not subdir.exists():
         print(f"No {analysis_type} results found at {subdir}.", file=sys.stderr)
         print(f"Run per-lecture analysis first: "
-              f"python -m stan.lecture.analyze {analysis_type} batch --go")
+              f"python -m stan.lecture_tools.analyze {analysis_type} batch --go")
         sys.exit(1)
 
-    # Load all per-lecture results
-    result_files = sorted(subdir.glob("lecture_*_*.json"))
+    # Load per-lecture results
+    result_files = find_results(subdir, analysis_type, section=section)
     if not result_files:
-        print(f"No result files in {subdir}.", file=sys.stderr)
+        scope = f" for section {section}" if section else ""
+        print(f"No {analysis_type} result files in {subdir}{scope}.", file=sys.stderr)
         sys.exit(1)
 
     all_results = []
-    for f in result_files:
+    for lid, f in result_files:
         data = json.loads(f.read_text(encoding="utf-8"))
         all_results.append({
-            "lecture_number": data["lecture_number"],
+            "lecture": lid.key,
+            "lecture_number": lid.number,
             "result": data["result"],
         })
 
-    print(f"Aggregating {len(all_results)} {analysis_type} results")
-    out_path = subdir / f"semester_{analysis_type}.json"
+    print(f"Aggregating {len(all_results)} {analysis_type} results"
+          f"{f' (section {section})' if section else ''}")
+    suffix = f"_{section}" if section else ""
+    out_path = subdir / f"semester_{analysis_type}{suffix}.json"
 
     if not go:
         print(f"\nDry run. Would aggregate to: {out_path}")
@@ -760,13 +1363,14 @@ def aggregate(
     print(f"  [AGGREGATE]  {analysis_type}...", end="", flush=True)
     t0 = time.time()
     result = client.generate_json(
-        user_prompt, system=system_prompt, temperature=0.3
+        user_prompt, system=system_prompt, temperature=0.3,
+        schema=AGGREGATE_SCHEMAS[analysis_type],
     )
     elapsed = time.time() - t0
     print(f" {elapsed:.1f}s")
 
     envelope = make_envelope(
-        lecture_num=0,
+        lid=LectureID(section=section, number=0),
         source_file=f"{len(all_results)} lecture results",
         analysis_type=f"aggregate_{analysis_type}",
         model=client.model,
@@ -782,14 +1386,25 @@ def aggregate(
 
 # ── Report ────────────────────────────────────────────────────────────
 
-def _format_summary_report(data: dict, lecture_num: int, class_num: int | None = None) -> str:
+def _report_label(lid: LectureID, class_num: int | None = None) -> str:
+    """Build a report heading for one lecture.
+
+    Sectioned recordings are already numbered in teaching order, so the
+    capture-number cross-reference only applies to the legacy Panopto corpus,
+    whose capture numbers run roughly backwards.
+    """
+    if lid.section is not None:
+        name = lecture_instructor(lid)
+        return f"Sec {lid.section} Class {lid.number:02d}" + (f" (taught by {name})" if name else "")
+    if class_num is not None:
+        return f"Class {class_num:02d} (capture {lid.number:03d})"
+    return f"Lecture {lid.number:03d}"
+
+
+def _format_summary_report(data: dict, lid: LectureID, class_num: int | None = None) -> str:
     """Format a single summary result as readable text."""
     r = data["result"]
-    if class_num is not None:
-        header = f"Class {class_num:02d} (capture {lecture_num:03d}): {r.get('title', '(no title)')}"
-    else:
-        header = f"Lecture {lecture_num:03d}: {r.get('title', '(no title)')}"
-    lines = [header]
+    lines = [f"{_report_label(lid, class_num)}: {r.get('title', '(no title)')}"]
 
     # Topics — handle both schema variants (name/description or topic/notes)
     topics = r.get("topics", [])
@@ -827,12 +1442,15 @@ def _format_summary_report(data: dict, lecture_num: int, class_num: int | None =
     return "\n".join(lines)
 
 
-def _format_questions_report(data: dict, lecture_num: int, class_num: int | None = None) -> str:
+def _format_questions_report(data: dict, lid: LectureID, class_num: int | None = None) -> str:
     """Format a single questions result as readable text."""
     r = data["result"]
+    # Drop non-dict entries: the model occasionally emits a stray schema key
+    # (e.g. the bare string "context") as a list item.  Observed on 3 of the
+    # 35 Spring 2026 lectures with llama3.1:8B.
     questions = [q for q in r.get("questions", []) if isinstance(q, dict)]
     student_q = sum(1 for q in questions if q.get("speaker") == "student")
-    label = f"Class {class_num:02d}" if class_num is not None else f"Lecture {lecture_num:03d}"
+    label = _report_label(lid, class_num)
     lines = [f"{label}: {len(questions)} questions "
              f"({student_q} student, {len(questions) - student_q} instructor)"]
     for q in questions:
@@ -845,11 +1463,11 @@ def _format_questions_report(data: dict, lecture_num: int, class_num: int | None
     return "\n".join(lines)
 
 
-def _format_confusion_report(data: dict, lecture_num: int, class_num: int | None = None) -> str:
+def _format_confusion_report(data: dict, lid: LectureID, class_num: int | None = None) -> str:
     """Format a single confusion result as readable text."""
     r = data["result"]
     points = r.get("confusion_points", [])
-    label = f"Class {class_num:02d}" if class_num is not None else f"Lecture {lecture_num:03d}"
+    label = _report_label(lid, class_num)
     lines = [f"{label}: {len(points)} confusion points"]
     for p in points:
         ts = p.get("timestamp", "")
@@ -860,11 +1478,11 @@ def _format_confusion_report(data: dict, lecture_num: int, class_num: int | None
     return "\n".join(lines)
 
 
-def _format_anecdotes_report(data: dict, lecture_num: int, class_num: int | None = None) -> str:
+def _format_anecdotes_report(data: dict, lid: LectureID, class_num: int | None = None) -> str:
     """Format a single anecdotes result as readable text."""
     r = data["result"]
     items = r.get("items", [])
-    label = f"Class {class_num:02d}" if class_num is not None else f"Lecture {lecture_num:03d}"
+    label = _report_label(lid, class_num)
     lines = [f"{label}: {len(items)} items"]
     for item in items:
         itype = item.get("type", "?")
@@ -892,45 +1510,53 @@ def _load_teaching_order() -> dict[str, int]:
     return {str(k): int(v) for k, v in data.get("order", {}).items()}
 
 
-def report(analysis_type: str, analysis_dir: Path) -> None:
+def report(analysis_type: str, analysis_dir: Path, section: str | None = None) -> None:
     """Print a formatted semester report for an analysis type."""
     subdir = analysis_dir / OUTPUT_SUBDIRS[analysis_type]
     if not subdir.exists():
         print(f"No {analysis_type} results found at {subdir}.", file=sys.stderr)
         print(f"Run analysis first: "
-              f"python -m stan.lecture.analyze {analysis_type} batch --go")
+              f"python -m stan.lecture_tools.analyze {analysis_type} batch --go")
         sys.exit(1)
 
-    result_files = sorted(subdir.glob("lecture_*_*.json"))
+    result_files = find_results(subdir, analysis_type, section=section)
     if not result_files:
-        print(f"No result files in {subdir}.", file=sys.stderr)
+        scope = f" for section {section}" if section else ""
+        print(f"No {analysis_type} result files in {subdir}{scope}.", file=sys.stderr)
         sys.exit(1)
 
-    # Load teaching order and sort by it (fall back to capture number)
+    # Map legacy captures to teaching order; sectioned recordings are already
+    # numbered in teaching order, so they pass their own number through.
     teaching_order = _load_teaching_order()
     entries = []
-    for f in result_files:
+    for lid, f in result_files:
         data = json.loads(f.read_text(encoding="utf-8"))
-        capture_num = data["lecture_number"]
-        class_num = teaching_order.get(f"{capture_num:03d}", capture_num)
-        entries.append((class_num, capture_num, data))
-    entries.sort(key=lambda e: e[0])
+        if lid.section is None:
+            class_num = teaching_order.get(f"{lid.number:03d}", lid.number)
+        else:
+            class_num = lid.number
+        entries.append((lid, class_num, data))
+    entries.sort(key=lambda e: (e[0].section or "", e[1]))
 
     formatter = REPORT_FORMATTERS[analysis_type]
 
     has_order = bool(teaching_order)
+    sections = sorted({lid.section for lid, _, _ in entries if lid.section})
     print(f"\n{'=' * 65}")
+    plural = "lecture" if len(entries) == 1 else "lectures"
     print(f"  CHEG 231 — Semester {analysis_type.title()} Report "
-          f"({len(entries)} lectures)")
+          f"({len(entries)} {plural})")
+    if sections:
+        print(f"  Sections: {', '.join(sections)}")
     if has_order:
         print(f"  (sorted by teaching order)")
     print(f"{'=' * 65}\n")
 
-    for class_num, capture_num, data in entries:
+    for lid, class_num, data in entries:
         if has_order:
-            print(formatter(data, capture_num, class_num=class_num))
+            print(formatter(data, lid, class_num=class_num))
         else:
-            print(formatter(data, capture_num))
+            print(formatter(data, lid))
         print()
 
 
@@ -950,6 +1576,24 @@ def add_common_args(parser):
     parser.add_argument("--go", action="store_true", help="Actually run (default is dry run)")
     parser.add_argument("--overwrite", action="store_true", help="Re-analyze existing results")
     parser.add_argument("--filter", type=str, default=None, help="Filter transcripts by string")
+    add_notation_args(parser)
+
+
+def add_notation_args(parser):
+    """Notation-primer options (apply to summary only; see NOTATION_TYPES)."""
+    parser.add_argument(
+        "--no-notation", action="store_true",
+        help="Omit the textbook notation primer from the summary prompt",
+    )
+    parser.add_argument(
+        "--chapters", type=_chapter_list, default=None,
+        help="Comma-separated chapters for the notation primer, overriding "
+             "lecture_chapters.json (e.g. 6 or 8,9)",
+    )
+
+
+def _chapter_list(value: str) -> list[int]:
+    return [int(c) for c in value.split(",") if c.strip()]
 
 
 def cmd_analysis(args, analysis_type: str):
@@ -965,12 +1609,14 @@ def cmd_analysis(args, analysis_type: str):
         if not json_path.exists():
             print(f"Error: companion JSON not found: {json_path}", file=sys.stderr)
             sys.exit(1)
-        num = extract_lecture_number(txt_path.name)
-        if num is None:
-            print("Warning: could not extract lecture number, using 0")
-            num = 0
+        lid = extract_lecture_id(txt_path.name)
+        if lid is None:
+            print(f"Warning: could not parse a lecture id from "
+                  f"{txt_path.name!r}, using lecture 0")
+            lid = LectureID(section=None, number=0)
         analysis_dir = Path(args.output_dir)
-        analyze_one(analysis_type, num, txt_path, json_path, client, analysis_dir)
+        analyze_one(analysis_type, lid, txt_path, json_path, client, analysis_dir,
+                    notation=not args.no_notation, chapters=args.chapters)
 
     elif args.mode == "batch":
         analyze_batch(
@@ -981,6 +1627,8 @@ def cmd_analysis(args, analysis_type: str):
             go=args.go,
             filter_str=args.filter,
             overwrite=args.overwrite,
+            notation=not args.no_notation,
+            chapters=args.chapters,
         )
 
 
@@ -992,12 +1640,13 @@ def cmd_aggregate(args):
         analysis_dir=Path(args.output_dir),
         client=client,
         go=args.go,
+        section=args.section,
     )
 
 
 def cmd_report(args):
     """Print a formatted semester report."""
-    report(args.type, analysis_dir=Path(args.output_dir))
+    report(args.type, analysis_dir=Path(args.output_dir), section=args.section)
 
 
 def cmd_all(args):
@@ -1015,6 +1664,8 @@ def cmd_all(args):
             go=args.go,
             filter_str=args.filter,
             overwrite=args.overwrite,
+            notation=not args.no_notation,
+            chapters=args.chapters,
         )
 
 
@@ -1033,6 +1684,7 @@ def main():
         p_one.add_argument("file", help="Path to transcript .txt file")
         p_one.add_argument("--output-dir", type=str, default=str(DEFAULT_ANALYSIS_DIR))
         p_one.add_argument("--model", default=MODEL)
+        add_notation_args(p_one)
 
         p_batch = mode_sub.add_parser("batch", help=f"Batch analyze all transcripts")
         add_common_args(p_batch)
@@ -1044,6 +1696,8 @@ def main():
     p_rep.add_argument("type", choices=list(ANALYSIS_TYPES),
                        help="Analysis type to report on")
     p_rep.add_argument("--output-dir", type=str, default=str(DEFAULT_ANALYSIS_DIR))
+    p_rep.add_argument("--section", type=str, default=None,
+                       help="Limit the report to one section (e.g. 010)")
     p_rep.set_defaults(func=cmd_report)
 
     # aggregate
@@ -1053,6 +1707,8 @@ def main():
     p_agg.add_argument("--output-dir", type=str, default=str(DEFAULT_ANALYSIS_DIR))
     p_agg.add_argument("--model", default=MODEL)
     p_agg.add_argument("--go", action="store_true")
+    p_agg.add_argument("--section", type=str, default=None,
+                       help="Aggregate one section only (e.g. 010)")
     p_agg.set_defaults(func=cmd_aggregate)
 
     # all

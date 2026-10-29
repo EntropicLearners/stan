@@ -24,6 +24,7 @@ Stan consists of the following key elements
    :caption: Contents:
 
    installation
+   howto
    modules/index
 
 Applications

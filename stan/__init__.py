@@ -6,3 +6,4 @@ from . import utils
 from . import rag
 from . import hybrid_query
 from . import lecture_tools
+from . import notation
