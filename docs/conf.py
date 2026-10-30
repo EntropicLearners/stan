@@ -3,8 +3,6 @@ import shutil
 import sys
 from datetime import datetime
 
-import mock
-
 # Path setup
 # ----------
 # If extensions (or modules to document with autodoc) are in another directory,
